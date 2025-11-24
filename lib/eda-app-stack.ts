@@ -8,9 +8,12 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
+import { SES_EMAIL_FROM, SES_EMAIL_TO, SES_REGION } from "../env";
 
 import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
+
+
 
 export class EDAAppStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -27,6 +30,11 @@ export class EDAAppStack extends cdk.Stack {
       const imageProcessQueue = new sqs.Queue(this, "img-process-q", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
     });
+
+    const mailerQ = new sqs.Queue(this, "mailer-q", {
+      receiveMessageWaitTime: cdk.Duration.seconds(10),
+    });
+
 
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
@@ -46,6 +54,17 @@ export class EDAAppStack extends cdk.Stack {
       }
     );
 
+    const mailerFn = new lambdanode.NodejsFunction(this, "mailer", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(3),
+      entry: `${__dirname}/../lambdas/mailer.ts`,
+    });
+
+    mailerFn.addEnvironment("SES_EMAIL_FROM", SES_EMAIL_FROM);
+    mailerFn.addEnvironment("SES_EMAIL_TO", SES_EMAIL_TO);
+    mailerFn.addEnvironment("SES_REGION", SES_REGION);
+
     // S3 --> SQS
         imagesBucket.addEventNotification(
         s3.EventType.OBJECT_CREATED,
@@ -59,16 +78,41 @@ export class EDAAppStack extends cdk.Stack {
       maxBatchingWindow: cdk.Duration.seconds(5),
     });
 
+    const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+    }); 
+
+
     processImageFn.addEventSource(newImageEventSource);
+
+    mailerFn.addEventSource(newImageMailEventSource);
+
 
         newImageTopic.addSubscription(
       new subs.SqsSubscription(imageProcessQueue)
     );
 
+    newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
+
+
 
     // Permissions
 
     imagesBucket.grantRead(processImageFn);
+
+    mailerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "ses:SendEmail",
+          "ses:SendRawEmail",
+          "ses:SendTemplatedEmail",
+        ],
+        resources: ["*"],
+      })
+    );
+
 
     // Output
     
